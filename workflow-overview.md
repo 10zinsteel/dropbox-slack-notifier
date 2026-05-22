@@ -1,14 +1,57 @@
 # Dropbox → Slack Upload Notifier — Workflow Overview
 
-**n8n Instance:** https://tenzinsteel.app.n8n.cloud
-**Main Workflow:** Dropbox Upload Monitor (ID: `JttUNVm0MUk3W8YP`)
-**Last updated:** 2026-05-21
+**n8n Instance:** https://tenzinsteel.app.n8n.cloud  
+**Last updated:** 2026-05-22
+
+---
+
+## Workflows
+
+| Workflow | ID | Link |
+|---|---|---|
+| Main: Dropbox Upload Monitor | `JttUNVm0MUk3W8YP` | https://tenzinsteel.app.n8n.cloud/workflow/JttUNVm0MUk3W8YP |
+| Dropbox Webhook Verify | `XF1pruIwZBcqW91W` | https://tenzinsteel.app.n8n.cloud/workflow/XF1pruIwZBcqW91W |
+| Error Handler | `qZpsmMNj7o69jvRh` | https://tenzinsteel.app.n8n.cloud/workflow/qZpsmMNj7o69jvRh |
+
+---
+
+## Webhook URL
+
+```
+https://tenzinsteel.app.n8n.cloud/webhook/dropbox-notify
+```
+
+Register this URL in the Dropbox developer app (Webhooks tab). n8n routes GET (verification) to the verify workflow and POST (notifications) to the main workflow.
 
 ---
 
 ## What It Does
 
-When you upload files to your Dropbox under `/by date/2026/`, n8n automatically detects the new folder, waits until the upload is fully stable (i.e. the file count stops changing for 2 consecutive checks), then posts a summary message to the `#test` Slack channel listing each project and how many files were uploaded.
+When anything changes in your Dropbox under `/by date/2026/`, n8n scans all date folders, compares file counts per address subfolder against its database, and sends targeted Slack messages describing exactly what changed — new uploads, file additions, file removals, or deleted folders. Changes are confirmed stable across 2 consecutive checks before notifying.
+
+---
+
+## Architecture (16 nodes)
+
+```
+Webhook: Dropbox Notify (POST /webhook/dropbox-notify)
+  → Respond: 200 OK               ← sends immediate 200 to Dropbox, then continues
+  → Dropbox: List Year Folder (/by date/2026)
+  → Code: Find New Folders        ← migrates/reads/writes staticData.db, detects deletions
+  → Split In Batches (Date Folders)
+      DONE  → Code: Send Deletion Messages → Slack: Send Deletion Alert
+      LOOP  → Dropbox: List Date Folder    ← also looped back to from Wait: 60s
+                → Code: Filter & Tag Projects
+                → Dropbox: List Project Files
+                → Code: Check Stability, Decide & Format
+                → IF: Upload Complete?
+                    TRUE  → Slack: Send to #test → loop back to Split In Batches
+                    FALSE → IF: No Change?
+                                TRUE  → loop back to Split In Batches (skip folder)
+                                FALSE → Wait: 60s → loop back to Dropbox: List Date Folder
+
+Manual Trigger → Dropbox: List Year Folder (for manual test runs)
+```
 
 ---
 
@@ -22,6 +65,35 @@ Two sets of credentials are configured in n8n:
 | Slack OAuth2 API | Slack | Slack notification node |
 
 Both are connected via OAuth2 — n8n has authorized access to Dropbox and Slack and holds the tokens securely.
+
+---
+
+## Key Config
+
+Constants set in **Code: Find New Folders**:
+
+- `SLACK_CHANNEL`: `#test`
+- `REQUIRED_STABLE_CHECKS`: `2`
+
+---
+
+## Storage Model
+
+Stored in `staticData` (n8n workflow static data, persists between executions):
+
+- `staticData.db` — `{ "5-21-26": { "Address A": 6, "Address B": 4 } }` — per-subfolder file counts per date folder
+- `staticData.pendingChanges` — in-progress stability checks (cleared after each notification)
+- `staticData.deletionMessages` — queued deletion alert strings (flushed by Code: Send Deletion Messages)
+
+### Change Types Detected
+
+| Trigger | Slack Message |
+|---|---|
+| New date folder | `New upload: 5-21-26 — Address A (6 files), Address B (4 files)` |
+| Files added to existing folder | `Update to 5-21-26 — Address A: 6 → 8 files (+2)` |
+| Files removed | `Files removed from 5-21-26 — Address A: 6 → 4 files (-2)` |
+| New subfolder in existing folder | `New subfolder in 5-21-26 — Address B: 3 files` |
+| Entire folder deleted | `Folder deleted: 5-16-26 — Address A (6 files), Address B (4 files)` |
 
 ---
 
@@ -42,8 +114,8 @@ Immediately sends a `200 OK` acknowledgment back to Dropbox. This is required �
 ---
 
 ### 3. Dropbox: List Year Folder
-**Type:** Dropbox — list folder
-**Path:** `/by date/2026`
+**Type:** Dropbox — list folder  
+**Path:** `/by date/2026`  
 **Credential:** Dropbox OAuth2 API
 
 Reads the top-level contents of your `/by date/2026` folder to get a list of all date-named subfolders (e.g. `5-21-26`, `5-20-26`).
@@ -53,7 +125,11 @@ Reads the top-level contents of your `/by date/2026` folder to get a list of all
 ### 4. Code: Find New Folders
 **Type:** Code (JavaScript)
 
-Compares the date folders returned by Dropbox against a permanent internal record of folders already processed (`staticData.processedDatesText`). Any folder not in that record is treated as new. New folders are sorted most-recent-first so the latest upload is handled first.
+On first run after the upgrade, migrates legacy `processedDatesText`/`pendingFolders` state into the new `staticData.db` format, seeding all known folders with a `null` sentinel so they're silently initialized on first scan.
+
+On every run:
+- Detects any date folder in `db` that no longer exists in Dropbox → queues a "Folder deleted" message into `staticData.deletionMessages` and removes it from `db`
+- Returns ALL current date folders sorted most-recent-first (not just new ones) so the workflow can detect any change, not just brand-new folders
 
 Key settings configured here:
 - **SLACK_CHANNEL** = `#test` — where notifications are posted
@@ -64,16 +140,16 @@ Key settings configured here:
 ### 5. Split In Batches (Date Folders)
 **Type:** Split In Batches
 
-Processes each new date folder one at a time. After a folder's Slack message is sent, the workflow loops back here to pick up the next folder. When all new folders are done, the workflow ends.
+Processes each date folder one at a time. After a folder's Slack message is sent, the workflow loops back here to pick up the next folder. When all folders are done, the DONE output fires the deletion message pipeline.
 
 ---
 
 ### 6. Dropbox: List Date Folder
-**Type:** Dropbox — list folder
-**Path:** dynamic (the current date folder being processed)
+**Type:** Dropbox — list folder  
+**Path:** dynamic (the current date folder being processed)  
 **Credential:** Dropbox OAuth2 API
 
-Lists the contents of the current date folder (e.g. `/by date/2026/5-21-26`) to find all the project subfolders inside it. This node is also the target of the retry loop — if an upload isn't stable yet, the workflow comes back here after waiting 30 seconds.
+Lists the contents of the current date folder (e.g. `/by date/2026/5-21-26`) to find all the address subfolders inside it. This node is also the target of the retry loop — if an upload isn't stable yet, the workflow comes back here after waiting 60 seconds.
 
 ---
 
@@ -84,31 +160,31 @@ Filters the folder listing to keep only subfolders (skipping any loose files at 
 
 ---
 
-### 8. HTTP Request: Count Files Recursively
-**Type:** HTTP Request (POST to Dropbox API)
-**Endpoint:** `https://api.dropboxapi.com/2/files/list_folder`
+### 8. Dropbox: List Project Files
+**Type:** Dropbox — list folder (recursive)  
 **Credential:** Dropbox OAuth2 API
 
-For each project folder, this calls the Dropbox API directly with `recursive: true` to count every file nested anywhere inside — including subfolders of subfolders. This gives an accurate total file count per project regardless of how deep the folder structure goes.
+For each address subfolder, lists all files recursively to get an accurate total file count regardless of how deep the folder structure goes.
 
 ---
 
 ### 9. Code: Check Stability, Decide & Format
 **Type:** Code (JavaScript)
 
-The stability check. It compares the current total file count against the count from the last check (stored in `staticData.pendingFolders`):
+Compares per-subfolder file counts (from `staticData.db`) against the current Dropbox listing:
 
-- Count **changed** → reset the stable-check counter (upload still in progress)
-- Count **the same** → increment the counter
-- Counter reaches **2** → mark the folder as fully processed and format the Slack message
+- **Migration sentinel** (`db[folder] === null`): silently saves current counts, returns `noChange: true`
+- **No change** (counts match db): returns `noChange: true` — skips wait loop entirely
+- **Change detected**: runs stability check using `staticData.pendingChanges`:
+  - Counts differ from last check → reset stable counter
+  - Counts same as last check → increment counter
+  - Counter reaches 2 → build targeted Slack message, save new counts to `db`
 
-Example Slack message:
-```
-Project Alpha - 14 files, was successfully uploaded to 5-21-26
-Project Beta - 8 files, was successfully uploaded to 5-21-26
-```
-
-Once a folder is marked done it's written to the permanent record so it's never processed again, even if the workflow is triggered again later.
+Message format by change type:
+- New folder: `New upload: 5-21-26 — Address A (6 files), Address B (4 files)`
+- Files added: `Update to 5-21-26 — Address A: 6 → 8 files (+2)`
+- Files removed: `Files removed from 5-21-26 — Address A: 6 → 4 files (-2)`
+- New subfolder: `New subfolder in 5-21-26 — Address B: 3 files`
 
 ---
 
@@ -117,23 +193,47 @@ Once a folder is marked done it's written to the permanent record so it's never 
 
 Routes the workflow based on the stability check result:
 - **TRUE** → send the Slack notification
-- **FALSE** → wait 30 seconds and re-check
+- **FALSE** → check if it's a no-change skip (→ `IF: No Change?`)
+
+---
+
+### 10a. IF: No Change?
+**Type:** IF condition (`noChange === true`)
+
+Routes the FALSE branch from "IF: Upload Complete?":
+- **TRUE** (no change detected) → loop back to Split In Batches to process next folder immediately
+- **FALSE** (change detected but not yet stable) → Wait: 60s and re-check
 
 ---
 
 ### 11. Slack: Send to #test
-**Type:** Slack — send message
-**Channel:** `#test`
+**Type:** Slack — send message  
+**Channel:** `#test`  
 **Credential:** Slack OAuth2 API
 
 Posts the formatted upload summary to your `#test` Slack channel. After the message is sent, loops back to the Split In Batches node to process the next date folder (if any).
 
 ---
 
-### 12. Wait: 30s
-**Type:** Wait (30 seconds)
+### 12. Wait: 60s
+**Type:** Wait (60 seconds)
 
-When an upload isn't stable yet, the workflow pauses here for 30 seconds before looping back to re-check the date folder (back to node 6). This repeats until the file count stabilizes across 2 consecutive checks.
+When a change is detected but not yet stable, the workflow pauses here for 60 seconds before looping back to re-check the date folder (back to node 6). This repeats until the file counts stabilize across 2 consecutive checks.
+
+---
+
+### 12a. Code: Send Deletion Messages
+**Type:** Code (JavaScript)
+
+Runs after Split In Batches finishes all folders (the "done" output). Drains the `staticData.deletionMessages` queue built up by "Code: Find New Folders" and emits one item per message for Slack delivery.
+
+---
+
+### 12b. Slack: Send Deletion Alert
+**Type:** Slack — send message  
+**Channel:** `#test`
+
+Sends deletion alerts for date folders that were removed from Dropbox. Each deleted folder gets its own message: `Folder deleted: 5-16-26 — Address A (6 files), Address B (4 files)`
 
 ---
 
@@ -147,27 +247,31 @@ A "run now" button in the n8n editor. Plugs into the List Year Folder node, so y
 ## Full Flow Summary
 
 ```
-You upload files to Dropbox (/by date/2026/5-21-26/ProjectName/)
+Anything changes in Dropbox (/by date/2026/)
   → Dropbox calls the webhook URL
     → n8n replies 200 OK immediately
-    → Lists /by date/2026 to find all date folders
-    → Filters to only new date folders not yet processed
-    → For each new date folder:
-        → Lists project subfolders inside it
-        → Counts all files recursively per project
-        → Checks if file counts are stable:
-            STABLE (2 consecutive same counts)
-              → Post summary to #test Slack
+    → Lists /by date/2026 to get all date folders
+    → Detects any db-tracked folders missing from Dropbox → queues deletion messages
+    → Feeds ALL date folders into Split In Batches (most-recent-first)
+    → For each date folder:
+        → Lists address subfolders
+        → Lists files in each subfolder (recursive)
+        → Compares per-subfolder counts to db:
+            NO CHANGE → skip, move to next folder immediately
+            MIGRATION SENTINEL (null) → silently init db, skip
+            CHANGE DETECTED (not yet stable):
+              → Wait 60s → re-check same folder
+            STABLE (2 consecutive same counts):
+              → Format targeted message (new/update/removed/new subfolder)
+              → Post to #test Slack
               → Move to next date folder
-            NOT STABLE
-              → Wait 30s → re-check same folder
+    → After all folders done:
+        → Flush deletion message queue → Post each to #test Slack
 ```
 
 ---
 
-## Supporting Workflows
+## MCP
 
-| Workflow | ID | Purpose |
-|----------|----|---------|
-| Dropbox Webhook Verify | `XF1pruIwZBcqW91W` | Handles the one-time GET request Dropbox sends when first registering the webhook URL to confirm it's valid |
-| Error Handler | `qZpsmMNj7o69jvRh` | Catches any failures in the main workflow |
+n8n MCP server is configured in `.mcp.json` (project-level). It connects to the instance above.  
+Run `claude mcp` in terminal to check server status if n8n tools aren't appearing.
