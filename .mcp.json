@@ -4,8 +4,8 @@
       "command": "npx",
       "args": ["-y", "n8n-mcp"],
       "env": {
-         "N8N_API_URL": "https://tenzinsteel.app.n8n.cloud",
-        "N8N_API_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMDI5MmRiNy0xNjRjLTQ3MDEtOWQxNy05MjczYjNmNjljOTMiLCJpc3MiOiJuOG4iLCJhdWQiOiJwdWJsaWMtYXBpIiwianRpIjoiMWM3YjcyZjUtNGQ2My00YjU5LTliNDgtNzQxYjliZDQ2NjQ5IiwiaWF0IjoxNzc5NTAxODk4LCJleHAiOjE3ODIwMjUyMDB9.humbwHcKXPf_fKx4zE8zigLgmtdFclsXE-bArJgTtQw"
+         "N8N_API_URL": "https://relativitysystems.app.n8n.cloud",
+        "N8N_API_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJkMDJlNmM3Ni0zMDlmLTQ3OTEtYTlhMy0zZTI1ZDIxZDljOGIiLCJpc3MiOiJuOG4iLCJhdWQiOiJwdWJsaWMtYXBpIiwianRpIjoiZTRiMTVjZTItMzFhZC00Y2Y4LTkzZWEtYTQ5Mzk3ZTkxZDg1IiwiaWF0IjoxNzc5OTIyMzExfQ.mMJKBR8XypDZTLx9VkSQUc9zBRQMZwMNqperC2_1F0I"
       }
     }
   }
